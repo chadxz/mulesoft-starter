@@ -9,7 +9,7 @@ You've successfully completed:
 5. ✅ Used the visual debugger to step through flows
 
 ## Your Working Application
-- **Project**: `/Users/chad/mulesoft-starter`
+- **Project**: `~/src/mulesoft-starter`
 - **Endpoints**:
   - GET http://localhost:8081/health
   - GET http://localhost:8081/api/employees
