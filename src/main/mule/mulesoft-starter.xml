@@ -1,0 +1,296 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:db="http://www.mulesoft.org/schema/mule/db"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core 
+        http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http 
+        http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/db 
+        http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd
+        http://www.mulesoft.org/schema/mule/ee/core 
+        http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+
+    <!-- HTTP Listener Configuration -->
+    <http:listener-config name="HTTP_Listener_config" doc:name="HTTP Listener config">
+        <http:listener-connection host="0.0.0.0" port="8081" />
+    </http:listener-config>
+
+    <!-- Database Configuration -->
+    <db:config name="Database_Config" doc:name="Database Config">
+        <db:generic-connection url="jdbc:h2:mem:test;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE" 
+                               driverClassName="org.h2.Driver" />
+    </db:config>
+
+    <!-- Initialize Database Flow -->
+    <flow name="initialize-database" doc:name="Initialize Database">
+        <scheduler doc:name="Scheduler">
+            <scheduling-strategy>
+                <fixed-frequency frequency="999999" timeUnit="HOURS"/>
+            </scheduling-strategy>
+        </scheduler>
+        
+        <db:execute-script doc:name="Create Tables" config-ref="Database_Config">
+            <db:sql><![CDATA[
+                CREATE TABLE IF NOT EXISTS employees (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    name VARCHAR(100) NOT NULL,
+                    email VARCHAR(100) UNIQUE NOT NULL,
+                    department VARCHAR(50),
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                
+                INSERT INTO employees (name, email, department) VALUES 
+                ('John Doe', 'john@example.com', 'Engineering'),
+                ('Jane Smith', 'jane@example.com', 'Marketing'),
+                ('Bob Johnson', 'bob@example.com', 'Sales');
+            ]]></db:sql>
+        </db:execute-script>
+        
+        <logger level="INFO" doc:name="Logger" message="Database initialized successfully"/>
+    </flow>
+
+    <!-- GET /api/employees - List all employees -->
+    <flow name="get-all-employees" doc:name="Get All Employees">
+        <http:listener doc:name="GET /api/employees" 
+                      config-ref="HTTP_Listener_config" 
+                      path="/api/employees" 
+                      allowedMethods="GET"/>
+        
+        <logger level="INFO" doc:name="Log Request" 
+                message='#["Retrieving all employees"]'/>
+        
+        <db:select doc:name="Select All Employees" config-ref="Database_Config">
+            <db:sql>SELECT * FROM employees</db:sql>
+        </db:select>
+        
+        <ee:transform doc:name="Transform to JSON">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    success: true,
+    count: sizeOf(payload),
+    employees: payload map {
+        id: $.id,
+        name: $.name,
+        email: $.email,
+        department: $.department,
+        createdAt: $.created_at
+    }
+}]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+        
+        <logger level="INFO" doc:name="Log Response" 
+                message='#["Retrieved " ++ sizeOf(payload.employees) ++ " employees"]'/>
+    </flow>
+
+    <!-- GET /api/employees/{id} - Get employee by ID -->
+    <flow name="get-employee-by-id" doc:name="Get Employee by ID">
+        <http:listener doc:name="GET /api/employees/{id}" 
+                      config-ref="HTTP_Listener_config" 
+                      path="/api/employees/{id}" 
+                      allowedMethods="GET"/>
+        
+        <logger level="INFO" doc:name="Log Request" 
+                message='#["Retrieving employee with ID: " ++ attributes.uriParams.id]'/>
+        
+        <db:select doc:name="Select Employee" config-ref="Database_Config">
+            <db:sql>SELECT * FROM employees WHERE id = :id</db:sql>
+            <db:input-parameters><![CDATA[#[{
+                id: attributes.uriParams.id as Number
+            }]]]></db:input-parameters>
+        </db:select>
+        
+        <choice doc:name="Check if Employee Exists">
+            <when expression="#[sizeOf(payload) > 0]">
+                <ee:transform doc:name="Transform to JSON">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    success: true,
+    employee: {
+        id: payload[0].id,
+        name: payload[0].name,
+        email: payload[0].email,
+        department: payload[0].department,
+        createdAt: payload[0].created_at
+    }
+}]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </when>
+            <otherwise>
+                <ee:transform doc:name="Employee Not Found">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    success: false,
+    error: "Employee not found"
+}]]></ee:set-payload>
+                    </ee:message>
+                    <ee:variables>
+                        <ee:set-variable variableName="httpStatus">404</ee:set-variable>
+                    </ee:variables>
+                </ee:transform>
+            </otherwise>
+        </choice>
+    </flow>
+
+    <!-- POST /api/employees - Create new employee -->
+    <flow name="create-employee" doc:name="Create Employee">
+        <http:listener doc:name="POST /api/employees" 
+                      config-ref="HTTP_Listener_config" 
+                      path="/api/employees" 
+                      allowedMethods="POST"/>
+        
+        <logger level="INFO" doc:name="Log Request" 
+                message='#["Creating new employee: " ++ write(payload, "application/json")]'/>
+        
+        <ee:transform doc:name="Validate Input">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/java
+---
+payload]]></ee:set-payload>
+            </ee:message>
+            <ee:variables>
+                <ee:set-variable variableName="newEmployee"><![CDATA[%dw 2.0
+output application/java
+---
+{
+    name: payload.name,
+    email: payload.email,
+    department: payload.department default "General"
+}]]></ee:set-variable>
+            </ee:variables>
+        </ee:transform>
+        
+        <try doc:name="Try">
+            <db:insert doc:name="Insert Employee" config-ref="Database_Config">
+                <db:sql>INSERT INTO employees (name, email, department) 
+                        VALUES (:name, :email, :department)</db:sql>
+                <db:input-parameters><![CDATA[#[vars.newEmployee]]]></db:input-parameters>
+            </db:insert>
+            
+            <ee:transform doc:name="Success Response">
+                <ee:message>
+                    <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    success: true,
+    message: "Employee created successfully",
+    id: payload.generatedKeys[0].GENERATED_KEY
+}]]></ee:set-payload>
+                </ee:message>
+            </ee:transform>
+            
+            <error-handler>
+                <on-error-propagate type="DB:CONNECTIVITY">
+                    <ee:transform doc:name="Database Error">
+                        <ee:message>
+                            <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    success: false,
+    error: "Database connection error"
+}]]></ee:set-payload>
+                        </ee:message>
+                        <ee:variables>
+                            <ee:set-variable variableName="httpStatus">500</ee:set-variable>
+                        </ee:variables>
+                    </ee:transform>
+                </on-error-propagate>
+                <on-error-propagate type="ANY">
+                    <ee:transform doc:name="Generic Error">
+                        <ee:message>
+                            <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    success: false,
+                    error: error.description default "An error occurred"
+}]]></ee:set-payload>
+                        </ee:message>
+                        <ee:variables>
+                            <ee:set-variable variableName="httpStatus">400</ee:set-variable>
+                        </ee:variables>
+                    </ee:transform>
+                </on-error-propagate>
+            </error-handler>
+        </try>
+    </flow>
+
+    <!-- Health Check Endpoint -->
+    <flow name="health-check" doc:name="Health Check">
+        <http:listener doc:name="GET /health" 
+                      config-ref="HTTP_Listener_config" 
+                      path="/health" 
+                      allowedMethods="GET"/>
+        
+        <ee:transform doc:name="Health Status">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    status: "healthy",
+    timestamp: now(),
+    application: "mulesoft-starter",
+    version: "1.0.0"
+}]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+    </flow>
+
+    <!-- Global Error Handler -->
+    <error-handler name="global-error-handler" doc:name="Global Error Handler">
+        <on-error-propagate type="HTTP:NOT_FOUND">
+            <ee:transform doc:name="404 Response">
+                <ee:message>
+                    <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    error: "Resource not found",
+    path: attributes.requestPath
+}]]></ee:set-payload>
+                </ee:message>
+                <ee:variables>
+                    <ee:set-variable variableName="httpStatus">404</ee:set-variable>
+                </ee:variables>
+            </ee:transform>
+        </on-error-propagate>
+        
+        <on-error-propagate type="ANY">
+            <logger level="ERROR" doc:name="Log Error" 
+                    message='#["Error: " ++ error.description]'/>
+            <ee:transform doc:name="Generic Error Response">
+                <ee:message>
+                    <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    error: "Internal server error",
+    message: error.description
+}]]></ee:set-payload>
+                </ee:message>
+                <ee:variables>
+                    <ee:set-variable variableName="httpStatus">500</ee:set-variable>
+                </ee:variables>
+            </ee:transform>
+        </on-error-propagate>
+    </error-handler>
+</mule>
